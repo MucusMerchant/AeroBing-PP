@@ -2,8 +2,8 @@ from PyQt6 import QtCore, QtWidgets, QtGui
 import pyqtgraph as pg
 import pyqtgraph.opengl as gl
 import numpy as np
-from packet_stream import PacketStream, PACKET_SPEC
-import ekf
+from lib.packet_stream_serial import PacketStream, PACKET_SPEC
+from lib.ekf import EkfWrapper
 import time
 
 # Reset the Teensy before running!!
