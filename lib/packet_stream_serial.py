@@ -4,8 +4,8 @@ import serial
 import struct # this library is very useful, handles structs for us
 import time
 
-SERIAL_PORT         = 'COM5' # will need to be changed for Mac or Linux, on windows enter 'mode' in cmd to find active port name
-SERIAL_BAUD  : int   = 9600#230400 # need to change when switching from radio to usb serial mode
+SERIAL_PORT         = 'COM8' # will need to be changed for Mac or Linux, on windows enter 'mode' in cmd to find active port name
+SERIAL_BAUD  : int   = 230400 # need to change when switching from radio to usb serial mode
 SYNC_BYTE    : bytes = b'\xaa'
 TYPE_SENSOR  : bytes = b'\x0b'
 TYPE_GPS     : bytes = b'\xca'
@@ -15,8 +15,9 @@ TYPE_COMMAND : bytes = b'\xa5'
 START_COMMAND : int = 0x6D656F77
 STOP_COMMAND  : int = 0x6D696175
 
-
-FILENAME = 'python/out.poop'
+current_time = time.localtime()
+formatted_time = time.strftime("%Y-%m-%d_%H-%M-%S", current_time)
+FILENAME = "data/" + formatted_time + ".poop"
 
 # struct specifications following documentation at https://docs.python.org/3/library/struct.html
 # defined in shart comms.h
@@ -30,17 +31,22 @@ PACKET_SPEC = {
 NUM_PACKETS_TO_READ = float('inf')
 
 # Raw IMU processing taken from adafruit library (i.e. from LSM datasheet)
-def convertRawIMU(ax: int, ay: int, az: int, gx: int, gy: int, gz: int) -> tuple[float]:
+# note that this is specific to out lsm configuration, must be adjusted if this changes
+def convertRawAcc(ax: int, ay: int, az: int) -> tuple[float]:
 
     c_ax = ax * 0.976 * 9.80665 / 1000.0
     c_ay = ay * 0.976 * 9.80665 / 1000.0
     c_az = az * 0.976 * 9.80665 / 1000.0
+    
+    return c_ax, c_ay, c_az
+
+def convertRawGyr(gx: int, gy: int, gz: int) -> tuple[float]:
 
     c_gx = gx * 70 * 0.017453293 / 1000.0
     c_gy = gy * 70 * 0.017453293 / 1000.0
     c_gz = gz * 70 * 0.017453293 / 1000.0
 
-    return c_ax, c_ay, c_az, c_gx, c_gy, c_gz
+    return c_gx, c_gy, c_gz
 
 # main class for handling packets though serial and files
 class PacketStream:
@@ -48,7 +54,11 @@ class PacketStream:
     def __init__(self, port: int, baudrate: int) -> None:
         self.serial_bus = serial.Serial(None, baudrate)
         self.serial_bus.port = port
+        self.last_time_stamp = 0
+        self.overflows = 0
         self.error_state = 0
+        self.packets_since_last_flush = 0
+        self.buffer_max_packets = 128
         self.file = open(FILENAME, 'wb')
 
     def open_port(self) -> None:
@@ -66,6 +76,9 @@ class PacketStream:
             else:
                 break
         print(" Done!", flush=True)
+
+    def close_port(self) -> None:
+        self.serial_bus.close()
 
     # Function to calculate the checksum
     def __calculate_checksum(self, data: bytes) -> bytes:
@@ -96,7 +109,12 @@ class PacketStream:
 
                     if (received_checksums) == (calculated_checksums):
                         packet_format = packet_info[1]
-                        return packet_type_byte, struct.unpack(packet_format, packet_data)
+                        packet = struct.unpack(packet_format, packet_data)
+                        if (packet[0] < self.last_time_stamp):
+                            self.overflows += 1
+                        self.last_time_stamp = packet[0]
+                        #packet[0] += self.overflows * 4294967295 # add uint32 max if overflow occurred
+                        return packet_type_byte, packet#struct.unpack(packet_format, packet_data)
                     else:
                         # CHECKSUM FAILED
                         self.error_state = 1
@@ -114,8 +132,11 @@ class PacketStream:
         if target == 'serial':
             self.serial_bus.write(SYNC_BYTE + packet_type + checksum_bytes + data)
         elif target == 'file':
+            self.packets_since_last_flush += 1
             self.file.write(SYNC_BYTE + packet_type + checksum_bytes + data)
-            self.file.flush()
+            if (self.packets_since_last_flush > self.buffer_max_packets):
+                self.file.flush()
+                self.packets_since_last_flush = 0
         else:
             pass
     
@@ -124,7 +145,7 @@ class PacketStream:
     
     def stop(self) -> None:
         self.__write_packet(TYPE_COMMAND, STOP_COMMAND.to_bytes(4, 'little'), 'serial')
-"""
+#"""
 if __name__ == "__main__":
     radio_serial = PacketStream(SERIAL_PORT, SERIAL_BAUD)
     radio_serial.open_port()
@@ -139,9 +160,12 @@ if __name__ == "__main__":
         packet_type, packet = radio_serial.read_packet()
         if (radio_serial.error_state == 0):
             break
+        #radio_serial.start()
     if (packet_type != TYPE_COMMAND or packet[0] != START_COMMAND):
         print("Acknowledgement not recognized, exiting")
         exit()
+    
+    lasttime = 0
     
     while packets < NUM_PACKETS_TO_READ:
         packet_type, packet = radio_serial.read_packet()
@@ -151,14 +175,18 @@ if __name__ == "__main__":
             packets += 1
         
         if packet_type == TYPE_SENSOR:
-            print("[SENSOR] " + str(packet))
+            pass
+            if (packet[0] - lasttime) > 5000:
+                print(packet[0] - lasttime)
+            lasttime = packet[0]
+            #print("[SENSOR] " + str(packet[11]))
             #print(convertRawIMU(*packet[1:7]))
         elif packet_type == TYPE_GPS:
-            print("[GPS] " + str(packet))
+            pass#print("[GPS] " + str(packet))
         else:
             continue
         
     radio_serial.stop()
     end = time.time()
     print(str(end-start) + " elapsed. " + str(NUM_PACKETS_TO_READ) + " packets read. " + str(fails) + " failures.")
-"""
+#"""

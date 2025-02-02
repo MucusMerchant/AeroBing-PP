@@ -105,3 +105,12 @@ def plot_accelerations_before_and_after(accs, accs_calibrated):
     ax.legend(["Uncalibrated norm", "Calibrated norm"])
     ax.set(xlabel='$time, s$', ylabel='$m/s^2$', ylim = [8.81, 10.81])
     plt.show()
+
+def plot_rotations_before_and_after(accs, accs_calibrated):
+    fig, ax = plt.subplots(1, 1, figsize=(8, 3))
+    times = np.arange(0, len(accs_calibrated)) * 0.01
+    ax.plot(times, np.linalg.norm(accs, axis=1), alpha = 0.5)
+    ax.plot(times, np.linalg.norm(accs_calibrated, axis=1), alpha = 0.5)
+    ax.legend(["Uncalibrated norm", "Calibrated norm"])
+    ax.set(xlabel='$time, s$', ylabel='$rad/s$', ylim = [-2.1, 2.1])
+    plt.show()
