@@ -15,9 +15,7 @@ TYPE_COMMAND : bytes = b'\xa5'
 START_COMMAND : int = 0x6D656F77
 STOP_COMMAND  : int = 0x6D696175
 
-current_time = time.localtime()
-formatted_time = time.strftime("%Y-%m-%d_%H-%M-%S", current_time)
-FILENAME = "data/" + formatted_time + ".poop"
+FILENAME = "data.poop"
 
 # struct specifications following documentation at https://docs.python.org/3/library/struct.html
 # defined in shart comms.h
@@ -51,7 +49,7 @@ def convertRawGyr(gx: int, gy: int, gz: int) -> tuple[float]:
 # main class for handling packets though serial and files
 class PacketStream:
 
-    def __init__(self, port: int, baudrate: int) -> None:
+    def __init__(self, port: int, baudrate: int, filename: str = FILENAME) -> None:
         self.serial_bus = serial.Serial(None, baudrate)
         self.serial_bus.port = port
         self.last_time_stamp = 0
@@ -59,7 +57,7 @@ class PacketStream:
         self.error_state = 0
         self.packets_since_last_flush = 0
         self.buffer_max_packets = 128
-        self.file = open(FILENAME, 'wb')
+        self.file = open(filename, 'wb')
 
     def open_port(self) -> None:
         print(f"Opening port {self.serial_bus.port}...", end="", flush=True)
@@ -110,9 +108,10 @@ class PacketStream:
                     if (received_checksums) == (calculated_checksums):
                         packet_format = packet_info[1]
                         packet = struct.unpack(packet_format, packet_data)
-                        if (packet[0] < self.last_time_stamp):
-                            self.overflows += 1
-                        self.last_time_stamp = packet[0]
+                        if packet_type_byte == TYPE_SENSOR:
+                            if (packet[0] < self.last_time_stamp):
+                                self.overflows += 1 # originally not working bc of the gps
+                            self.last_time_stamp = packet[0]
                         #packet[0] += self.overflows * 4294967295 # add uint32 max if overflow occurred
                         return packet_type_byte, packet#struct.unpack(packet_format, packet_data)
                     else:

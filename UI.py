@@ -9,31 +9,59 @@ from serial.tools import list_ports
 import time
 
 PLOT_BACKGROUND = "#141729"
+CALIB_DATAPOINTS = 2000
+CALIB_FREQUENCY = 200
 
-# Reset the Teensy before running!!
+current_time = time.localtime()
+formatted_time = time.strftime("%Y-%m-%d_%H-%M-%S", current_time)
+
 class PacketReader(QtCore.QThread):
     sensorPacketReceived = QtCore.pyqtSignal(list)
     gpsPacketReceived    = QtCore.pyqtSignal(list)
-    calibStart           = QtCore.pyqtSignal()
-    calibFinish          = QtCore.pyqtSignal(tuple)
     def __init__(self, com_port="COM8"):
         super().__init__()
-        self.radio_serial = PacketStream(com_port, 230400)
+        self.radio_serial = PacketStream(com_port, 230400, "data/" + formatted_time + ".poop")
         self.radio_serial.open_port()
         self.radio_serial.start()
-        self.calibStart.emit()
-        imu_data = get_imu_data(2000, 200, self.radio_serial)
-        #aC, ab, gC, gb, rm = all_calib_params(imu_data)
-        self.calibFinish.emit(all_calib_params(imu_data, 200))
+        self.paused = False
+
+    def flush(self):
+        self.radio_serial.serial_bus.reset_input_buffer()
 
     def run(self):
         while True:
+            if self.paused:
+                time.sleep(5)
+                continue
             packet_type, packet = self.radio_serial.read_packet()
-            #print(str(packet))
             if packet_type == b'\x0b':
                 self.sensorPacketReceived.emit(packet)
             if packet_type == b'\xca':
                 self.gpsPacketReceived.emit(packet)
+    
+    def pause(self):
+        self.paused = True
+
+    def unpause(self):
+        self.paused = False
+
+class SensorPlot(pg.PlotWidget):
+    def __init__(self, parent, title):
+        super().__init__(parent)
+        self.setMouseEnabled(x=False, y=False)
+        self.getAxis('bottom').setVisible(False)
+        self.setMinimumSize(400,100)
+        self.setTitle(title)
+        self.setBackground(PLOT_BACKGROUND)
+        self.time = np.arange(250)
+        self.data = np.zeros(250)
+        self.color = 'r'
+        self.line = self.plot(self.time, self.data, pen=self.color)
+    
+    def update_plot(self, points):
+        self.data[-1] = self.data[1:]
+        self.data[-1] = points
+        self.line.setData(self.time, self.data, _callSync='off')
 
 class SensorPlot3Axes(pg.PlotWidget):
     def __init__(self, parent, title):
@@ -45,7 +73,7 @@ class SensorPlot3Axes(pg.PlotWidget):
         self.setTitle(title)
         self.setBackground(PLOT_BACKGROUND)
         self.time = np.arange(250)
-        self.data = np.zeros((3, 250))  # Initialize 3 lines
+        self.data = np.zeros((3, 250))
         self.colors = ['r', 'g', '#845ae6']
         self.names = ['X', 'Y', 'Z']
         self.lines = [self.plot(self.time, self.data[i], pen=self.colors[i], name=self.names[i]) for i in range(3)]
@@ -66,7 +94,7 @@ class PosPlot(pg.PlotWidget):
         #self.alpha = np.linspace(0,255,200)
         #self.colors = [pg.mkColor([255,255,255,self.alpha[i]]) for i in range(200)]
         self.hor_data = np.zeros(200)
-        self.ver_data = np.zeros(200)  # Initialize 3 lines
+        self.ver_data = np.zeros(200)
         self.line = self.plot(self.hor_data, self.ver_data)
     
     def update_plot(self, hor, ver):
@@ -86,6 +114,20 @@ class ShartWindow(QtWidgets.QMainWindow):
         self.gps_packet    = None
         self.count = 0
         self.calibrated = False
+        self.calib_packets_read = 0
+        self.calib_data_arr = np.empty((CALIB_DATAPOINTS, 6))
+        self.calib_time_arr = np.empty(CALIB_DATAPOINTS)
+        self.calib_params = [
+            np.array([[1.0, 0.0, 0.0], 
+                      [0.0, 1.0, 0.0], 
+                      [0.0, 0.0, 1.0]]),
+            np.array([0.0, 0.0, 0.0]),
+            np.array([[1.0, 0.0, 0.0], 
+                      [0.0, 1.0, 0.0], 
+                      [0.0, 0.0, 1.0]]),
+            np.array([0.0, 0.0, 0.0]),
+            np.eye(3)
+        ]
 
     def _init_ui(self):
         # setup header and main hlayout
@@ -101,25 +143,22 @@ class ShartWindow(QtWidgets.QMainWindow):
         self.screen.addLayout(self.main_layout)
         self.main_layout.addWidget(self.mdi_area)
         self.main_layout.addLayout(self.side_bar)
-        
-        self.imu_window = QtWidgets.QMdiSubWindow()
-        self.imu_window.setWidget(QtWidgets.QWidget())
-        #self.imu_window.setWindowFlags(self.imu_window.windowFlags() & ~QtCore.Qt.WindowType.WindowCloseButtonHint)
-        self.mdi_area.addSubWindow(self.imu_window)
-        self.imu_window.show()
 
         self.orient_window = QtWidgets.QMdiSubWindow()
         self.orient_window.setWidget(QtWidgets.QWidget())
         self.mdi_area.addSubWindow(self.orient_window)
         self.orient_window.show()
 
-        # imu_window = QtWidgets.QMdiSubWindow()
-        # self.main_layout.addSubWindow(imu_window)
-        # self.poop = QtWidgets.QWidget()
-        # self.vlayout = QtWidgets.QVBoxLayout(imu_window)
-        # imu_window.setWidget(self.poop)
-        # imu_window.show()
-        
+        self.altitude_window = QtWidgets.QMdiSubWindow()
+        self.altitude_window.setWidget(QtWidgets.QWidget())
+        self.mdi_area.addSubWindow(self.altitude_window)
+        self.altitude_window.show()
+
+        self.imu_window = QtWidgets.QMdiSubWindow()
+        self.imu_window.setWidget(QtWidgets.QWidget())
+        #self.imu_window.setWindowFlags(self.imu_window.windowFlags() & ~QtCore.Qt.WindowType.WindowCloseButtonHint)
+        self.mdi_area.addSubWindow(self.imu_window)
+        self.imu_window.show()  
 
         self.showSensorData = True
         self.showOrientation = True
@@ -129,9 +168,8 @@ class ShartWindow(QtWidgets.QMainWindow):
         self._setup_side_bar()
         self._setup_3d_views()
         self._setup_sensor_plots()
+        self._setup_altitude()
         #self._setup_pos_plots()
-        self._setup_status()
-        self._setup_controls()
         
 
         self.setCentralWidget(self.centralWidget)
@@ -150,8 +188,8 @@ class ShartWindow(QtWidgets.QMainWindow):
 
     def _setup_header(self):
         header_label = QtWidgets.QLabel("SHART Telemetry Visualizer", self)
-        header_label.setStyleSheet("font-size: 16px; font-weight: bold; padding: 20px; text-align: center;")
-        # Create the COM Port selection combo box
+        header_label.setStyleSheet("font-size: 20px; font-weight: bold; padding: 20px; text-align: center;")
+
         self.com_port_combo = QtWidgets.QComboBox()
         self.com_port_combo.addItems(self._get_available_com_ports())
         self.com_port_combo.currentTextChanged.connect(self._on_com_port_selected)
@@ -162,7 +200,17 @@ class ShartWindow(QtWidgets.QMainWindow):
         self.header.addWidget(self.com_port_combo)
 
     def _setup_side_bar(self):
-        pass
+        self.status_labels = []
+        
+        for i in range(8):
+            status = (1 >> (7 - i)) & 1
+            status_label = QtWidgets.QLabel(f"Sensor {i + 1} Status:")
+            if status == 1:
+                status_label.setStyleSheet("color: green;")
+            else:
+                status_label.setStyleSheet("color: red;")
+            self.side_bar.addWidget(status_label)
+            self.status_labels.append(status_label)
 
     def _setup_sensor_plots(self):
         layout = QtWidgets.QVBoxLayout()
@@ -171,7 +219,6 @@ class ShartWindow(QtWidgets.QMainWindow):
         self.sensor_plot_widgets = [SensorPlot3Axes(self, sensor_names[i]) for i in range(3)]
         for plot_widget in self.sensor_plot_widgets:
             layout.addWidget(plot_widget)
-        #self.hlayout.addLayout(self.layout)
 
     def _setup_pos_plots(self):
         self.layout = QtWidgets.QVBoxLayout()
@@ -201,6 +248,13 @@ class ShartWindow(QtWidgets.QMainWindow):
         self.angle_label.setGeometry(30, 30, 100, 88)
 
         self.orient_window.setWidget(self.RotView)
+
+    def _reset_orientation(self):
+        self.xgrid.resetTransform()
+        self.xgrid.scale(0.3,0.3,0.3)
+
+    def _setup_altitude(self):
+        self.altitude_window.setWidget(SensorPlot(self, "Altitude"))
     
     def _setup_status(self):
         self.layout = QtWidgets.QVBoxLayout()
@@ -208,17 +262,6 @@ class ShartWindow(QtWidgets.QMainWindow):
         for plot_widget in self.pos_plot_widgets:
             self.side_bar.addWidget(plot_widget)
         #self.screen.addLayout(self.layout)
-
-    def _setup_controls(self):
-        layout = QtWidgets.QVBoxLayout()
-
-        # Add a button to reset the estimation
-        reset = QtWidgets.QPushButton("Reset")
-        reset.clicked.connect(self._reset_ekf)
-
-        layout.addWidget(reset)
-
-        #self.screen.addLayout(layout)
 
     def _get_available_com_ports(self):
         """Returns a list of available COM ports"""
@@ -233,20 +276,80 @@ class ShartWindow(QtWidgets.QMainWindow):
         self._reset_ekf()
         if (com_port == "None"):
             return
-        self.packet_reader = PacketReader(com_port)  # Create a new PacketReader with the selected COM port
+        
+        msg = QtWidgets.QMessageBox()
+        msg.setIconPixmap(QtGui.QPixmap("lala.png"))
+        msg.setWindowTitle("IMU Calibration Options")
+        msg.setText("Proceed with calibration or load from a file?")
+        msg.setStandardButtons(QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No)
+        msg.setDefaultButton(QtWidgets.QMessageBox.StandardButton.Yes)
+        yes_button = msg.button(QtWidgets.QMessageBox.StandardButton.Yes)
+        no_button = msg.button(QtWidgets.QMessageBox.StandardButton.No)
+
+        yes_button.setText("Start Calibration")
+        no_button.setText("Load from File")
+        response = msg.exec()
+        if response == QtWidgets.QMessageBox.StandardButton.Yes:
+            self.calibrated = False
+            
+        elif response == QtWidgets.QMessageBox.StandardButton.No:
+            
+            file_dialog = QtWidgets.QFileDialog(self)
+            file_dialog.setFileMode(QtWidgets.QFileDialog.FileMode.ExistingFile)  
+            file_dialog.setNameFilter("Calibration Files (*.npz)")
+            file_dialog.setViewMode(QtWidgets.QFileDialog.ViewMode.List)
+
+            if file_dialog.exec():
+                file_path = file_dialog.selectedFiles()[0]
+                calib_data = np.load(file_path)
+                self.calib_params[0] = calib_data['aC']
+                self.calib_params[1] = calib_data['ab']
+                self.calib_params[2] = calib_data['gC']
+                self.calib_params[3] = calib_data['gb']
+                self.calib_params[4] = calib_data['Rm']
+            
+            self.calibrated = True
+            
+        self.packet_reader = PacketReader(com_port)
         self.packet_reader.sensorPacketReceived.connect(self.process_sensor_packet)
         self.packet_reader.gpsPacketReceived.connect(self.process_gps_packet)
         self.packet_reader.start()
 
     @QtCore.pyqtSlot(list)
     def process_sensor_packet(self, packet):
-        
         self.sensor_packet = list(packet) #make packet available to UI for plotting
         self.sensor_packet[0] += self.packet_reader.radio_serial.overflows * 4294967295
-        self.sensor_packet[4:7] = convertRawGyr(*packet[4:7])
-        self.sensor_packet[1:4] = convertRawAcc(*packet[1:4])
+        self.sensor_packet[1:4] = calibrate_accelerometer_single(convertRawAcc(*packet[1:4]), self.calib_params[0], self.calib_params[1])
+        self.sensor_packet[4:7] = calibrate_gyroscope_single(convertRawGyr(*packet[4:7]), self.calib_params[2], self.calib_params[3], self.calib_params[4])
+        #self.sensor_packet[12:15] = packet[4:7] * 0.48069 # raw adxl to m/s^2
+        # Handle calibration in its entirety right here
+        # Yes this is ugly, too much unrelated code in this function, but no overhead for regular execution (just an extra branch instr in theory)
         if not self.calibrated:
+            if self.calib_packets_read < CALIB_DATAPOINTS:
+                self.calib_time_arr[self.calib_packets_read] = self.sensor_packet[0]
+                self.calib_data_arr[self.calib_packets_read] = self.sensor_packet[1:4] + self.sensor_packet[4:7]
+                self.calib_packets_read += 1
+                return
+            
+            self.packet_reader.pause()
+            # self.packet_reader.setPriority(QtCore.QThread.Priority.IdlePriority)
+            
+            reg_intervals = np.arange(self.calib_time_arr[0], self.calib_time_arr[-1], 1e6 / CALIB_FREQUENCY)
+            y_interpolated = np.zeros((len(reg_intervals), self.calib_data_arr.shape[1]))
+
+            # for each column, interpolate the data based on our specified intervals
+            for i in range(self.calib_data_arr.shape[1]):
+                y_interpolated[:, i] = np.interp(reg_intervals, self.calib_time_arr, self.calib_data_arr[:, i])
+            print(self.packet_reader.radio_serial.overflows)
+            self.calib_params = list(all_calib_params(y_interpolated, CALIB_FREQUENCY))
+            print(self.calib_params)
+            np.savez("calib/" + formatted_time, aC=self.calib_params[0], ab=self.calib_params[1], gC=self.calib_params[2], gb=self.calib_params[3], Rm=self.calib_params[4])
+            self.calibrated = True
+            self.packet_reader.flush()
+            self.packet_reader.unpause()
+            # self.packet_reader.setPriority(QtCore.QThread.Priority.NormalPriority)
             return
+
         if not self.kalman:
             self.kalman = EkfWrapper()
             self.kalman.begin(packet[0])
@@ -262,36 +365,42 @@ class ShartWindow(QtWidgets.QMainWindow):
         self.gps_packet = list(packet)
         self.gps_packet[0] += self.packet_reader.radio_serial.overflows * 4294967295
         if self.kalman:
-            self.kalman.setGPS(*packet)
+            self.kalman.setGPS(*self.gps_packet)
             #self.kalman.setGPS(packet[0], 407000000,-740000000, 30000,0,0,0,0,0,0,0,0,16,3,0,1)
 
     def _update_ui(self):
-        if not self.sensor_packet or not self.kalman:
+        if not self.sensor_packet:
             return
           
         if self.showSensorData:
             self.sensor_plot_widgets[0].update_plot(self.sensor_packet[1:4])
             self.sensor_plot_widgets[1].update_plot(self.sensor_packet[4:7])
             self.sensor_plot_widgets[2].update_plot(self.sensor_packet[7:10])
-        if self.showPosition:
+        if self.showPosition and self.kalman:
             pos = np.array(self.kalman.getPosition()).squeeze()
             self.pos_plot_widgets[0].update_plot(pos[1],  pos[0])
             self.pos_plot_widgets[1].update_plot(pos[0], -pos[2]) # note we negate the Down component for intuitive plots
             self.pos_plot_widgets[2].update_plot(pos[1], -pos[2])
-        if self.showOrientation:
+        if self.showOrientation and self.kalman:
             quat = np.array(self.kalman.getQuaternion()).squeeze()
             curr = QtGui.QQuaternion(*quat)
             self.xgrid.transform().rotate((self.last_quat.inverted()*curr)) # get the delta quaternion (only Transform3D object takes quaternion rotation)
             self.xgrid.update()
             self.last_quat = curr
             euler = self.last_quat.toEulerAngles()
-            pitch = np.degrees(euler.x()) % 360  # Convert radians to degrees
+            pitch = np.degrees(euler.x()) % 360
             roll =  np.degrees(euler.y()) % 360
             yaw =   np.degrees(euler.z()) % 360
 
             # Update label text
             self.angle_label.setText(f"Roll:  {roll:>.2f}°\nPitch: {pitch:>.2f}°\nYaw:   {yaw:>.2f}°")
         
+        for i in range(8): 
+            status = (self.sensor_packet[15] >> (7 - i)) & 1 
+            if status == 1:
+                self.status_labels[i].setStyleSheet("color: green;")
+            else:
+                self.status_labels[i].setStyleSheet("color: red;")
         ## CHECK IN-air/is vehicle at rest flags!
         #print(np.array(self.kalman.ekf.get_innovation_test_status())) #IMPORTANT!
         #print(np.array(self.kalman.ekf.getOutputTrackingError()))
