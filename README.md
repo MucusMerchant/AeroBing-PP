@@ -7,7 +7,6 @@ This is a repository for processing/filtering/visualizing data that is sent by t
 - [4] display useful information on a GUI for easy debugging/filter tuning
 
 ### TODO (a lot)
-- An IMU calibration protocol that can handle the timing of a calibration routine, generate calibration values, and apply them to all subsequent datapoints
 - A magnetometer calibration protocol
 - Kalman filter tuning - which parameters give us the best data?
 - Noise filtering for IMU data, intense vibration can ruin our data
@@ -19,6 +18,12 @@ This is a repository for processing/filtering/visualizing data that is sent by t
 - `packet_stream_serial.py` provides a class that parses packets from the flight computer into Python tuples. 
 
 ### Dependencies
-- Numpy
+You should be using Python 3.10. This is required to install the ecl wheel.
+Required packages:
+- numpy
 - ecl
 - PyQt6
+- matplotlib
+- pyserial
+- PyOpenGL
+- pyqtgraph

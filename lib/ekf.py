@@ -65,7 +65,7 @@ class EkfWrapper:
     def setBaro(self, timestamp, pres):
         barodata = ecl.baroSample()
         barodata.time_us = int(timestamp)
-        barodata.hgt = np.float32(44330.0 * (1.0 - pow((pres / 100 / 1013.25), 0.1903)))
+        barodata.hgt = np.float32(44330.0 * (1.0 - pow((pres / 101325), 0.1903)))
         #print(barodata.hgt)
         self.ekf.setBaroData(barodata)
 
