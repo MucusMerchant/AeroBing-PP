@@ -28,23 +28,34 @@ PACKET_SPEC = {
 #NUM_PACKETS_TO_READ = 1000 # set very high or infinity if u dont want a limit
 NUM_PACKETS_TO_READ = float('inf')
 
+LSM_ACC_CONVERSION_CONSTANT = 0.0095712904 # 0.976 * 9.80665 / 1000.0
+LSM_GYR_CONVERSION_CONSTANT = 0.00122173051 # 70 * 0.017453293 / 1000.0
+ADXL_CONVERSION_CONSTANT = 0.0047155689 # 0.480690  / 1000 * 9.81
+
 # Raw IMU processing taken from adafruit library (i.e. from LSM datasheet)
 # note that this is specific to out lsm configuration, must be adjusted if this changes
 def convertRawAcc(ax: int, ay: int, az: int) -> tuple[float]:
 
-    c_ax = ax * 0.976 * 9.80665 / 1000.0
-    c_ay = ay * 0.976 * 9.80665 / 1000.0
-    c_az = az * 0.976 * 9.80665 / 1000.0
+    c_ax = ax * LSM_ACC_CONVERSION_CONSTANT
+    c_ay = ay * LSM_ACC_CONVERSION_CONSTANT
+    c_az = az * LSM_ACC_CONVERSION_CONSTANT
     
     return c_ax, c_ay, c_az
 
 def convertRawGyr(gx: int, gy: int, gz: int) -> tuple[float]:
 
-    c_gx = gx * 70 * 0.017453293 / 1000.0
-    c_gy = gy * 70 * 0.017453293 / 1000.0
-    c_gz = gz * 70 * 0.017453293 / 1000.0
+    c_gx = gx * LSM_GYR_CONVERSION_CONSTANT
+    c_gy = gy * LSM_GYR_CONVERSION_CONSTANT
+    c_gz = gz * LSM_GYR_CONVERSION_CONSTANT
 
     return c_gx, c_gy, c_gz
+
+def convertRawAdxl(ax: int, ay: int, az: int) -> tuple[float]:
+    c_ax = ax * ADXL_CONVERSION_CONSTANT
+    c_ay = ay * ADXL_CONVERSION_CONSTANT
+    c_az = az * ADXL_CONVERSION_CONSTANT
+    
+    return c_ax, c_ay, c_az
 
 # main class for handling packets though serial and files
 class PacketStream:

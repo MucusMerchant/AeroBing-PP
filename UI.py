@@ -4,7 +4,7 @@ from PyQt6.QtCore import QThread, pyqtSignal, pyqtSlot, QTimer, Qt
 import pyqtgraph as pg
 from pyqtgraph import functions as fn
 import pyqtgraph.opengl as gl
-from OpenGL.GL import glEnable, glBlendFunc, glHint, glBegin, glEnd, glVertex3f, glColor4f, GL_LINES
+from OpenGL.GL import glBegin, glPointSize, glEnd, glVertex3f, glColor4f, glLineWidth, GL_LINES, GL_POINTS
 import numpy as np
 from lib.packet_stream_serial import *
 from lib.ekf import EkfWrapper
@@ -14,8 +14,10 @@ import time
 import math
 
 PLOT_BACKGROUND = "#141729"
-CALIB_DATAPOINTS = 2000
+CALIB_DATAPOINTS = 10000
 CALIB_FREQUENCY = 200
+FIX_TYPES = ["No fix", "Dead-reckoning only", "2D Fix", "3D Fix", "Epic", "Time only"]
+ADXL_32G = 65536 # or 2^16
 
 current_time = time.localtime()
 formatted_time = time.strftime("%Y-%m-%d_%H-%M-%S", current_time)
@@ -166,18 +168,87 @@ class GLMeshItem(gl.GLGraphicsItem.GLGraphicsItem):
         #     glEnable(GL_BLEND)
         #     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
         #     glHint(GL_LINE_SMOOTH_HINT, GL_NICEST)
-            
-        glBegin( GL_LINES )
+        glPointSize(3.5)
+        glBegin( GL_POINTS )
         
-        x,y,z = self.size()
         glColor4f(*self.color().getRgbF())
+        
         counter = 0
         for x in self.mesh:
-            if counter % 3 == 0:
+            if counter % 4 == 0:
                 glVertex3f(x[0], x[1], x[2])
             counter += 1
         
         glEnd()
+
+class GLBetterAxes(gl.GLAxisItem):
+    """
+    **Bases:** :class:`GLGraphicsItem <pyqtgraph.opengl.GLGraphicsItem.GLGraphicsItem>`
+    
+    Displays three lines indicating origin and orientation of local coordinate system. 
+    
+    """
+    
+    def __init__(self, size=None, antialias=False, glOptions='opaque', parentItem=None):
+        super().__init__(size, antialias, glOptions, parentItem)
+    
+    def paint(self):
+
+        #glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+        #glEnable( GL_BLEND )
+        #glEnable( GL_ALPHA_TEST )
+        self.setupGLState()
+        
+        # if self.antialias:
+        #     glEnable(GL_LINE_SMOOTH)
+        #     glHint(GL_LINE_SMOOTH_HINT, GL_NICEST)
+        glLineWidth(6)
+        glBegin( GL_LINES )
+        
+        x,y,z = self.size()
+        glColor4f(0, 1, 0, .6)  # z is green
+        glVertex3f(0, 0, 0)
+        glVertex3f(0, 0, z)
+
+        glColor4f(1, 1, 0, .6)  # y is yellow
+        glVertex3f(0, 0, 0)
+        glVertex3f(0, y, 0)
+
+        glColor4f(1, 0, 0, .6)  # x is blue
+        glVertex3f(0, 0, 0)
+        glVertex3f(x, 0, 0)
+        glEnd()
+
+class GLViewWidgetNoMouse(gl.GLViewWidget):
+    def __init__(self):
+        super().__init__()
+    def mousePressEvent(self, event):
+        pass
+    def mouseMoveEvent(self, event):
+        pass
+    def mouseReleaseEvent(self, event):
+        pass
+
+class QLabelPair(QtWidgets.QWidget):
+    def __init__(self, static_text, initial_dynamic_text, parent = None):
+        super().__init__(parent)
+
+        self.static_label = QtWidgets.QLabel(static_text, self)
+        self.dynamic_label = QtWidgets.QLabel(initial_dynamic_text, self)
+    
+        layout = QtWidgets.QHBoxLayout()
+        layout.addWidget(self.static_label)
+        layout.addWidget(self.dynamic_label)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        self.setLayout(layout)
+
+    def setText(self, new_text):
+        self.dynamic_label.setText(new_text)
+
+    def setStyleSheet(self, stylesheet):
+        self.static_label.setStyleSheet(stylesheet)
+        self.dynamic_label.setStyleSheet(stylesheet)
 
 def load_obj_to_numpy(file_path):
     vertices = []
@@ -195,19 +266,21 @@ def load_obj_to_numpy(file_path):
 class ShartWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
-        #self._init_estimation()
         self._init_ui()
         self.kalman = EkfWrapper()
-        self._kalman_uninitialized = True
+        self._kalman_uninitialized: bool = True
         self._sensor_packet = None
         self._gps_packet    = None
-        self._baseline_pressure = 101325
-        self._last_timestamp = 0
-        self._packets_missed = 0
-        self._calibrated = False
-        self._calib_packets_read = 0
+        self._using_adxl: bool = False
+        self._baseline_pressure: int = 101325
+        self._last_timestamp: int = 0
+        self._packets_missed: int = 0
+        self._calibrated: bool = False
+        self._calib_packets_read: int = 0
         self._calib_data_arr = np.empty((CALIB_DATAPOINTS, 6))
         self._calib_time_arr = np.empty(CALIB_DATAPOINTS)
+        self._calib_points: int = CALIB_DATAPOINTS
+        self._calib_save: bool = True
         self._calib_params = [
             np.array([[1.0, 0.0, 0.0], 
                       [0.0, 1.0, 0.0], 
@@ -236,19 +309,6 @@ class ShartWindow(QtWidgets.QMainWindow):
         self.main_layout.addWidget(self.mdi_area)
         self.main_layout.addLayout(self.side_bar)
 
-        # self.orient_window = QtWidgets.QWidget()
-        # self.mdi_area.addSubWindow(self.orient_window)
-        # self.orient_window.show()
-
-        # self.altitude_window = QtWidgets.QWidget()
-        # self.mdi_area.addSubWindow(self.altitude_window)
-        # self.altitude_window.show()
-
-        # self.imu_window = QtWidgets.QWidget()#QtWidgets.QMdiSubWindow()
-        # #self.imu_window.setWidget(QtWidgets.QWidget())
-        # self.mdi_area.addSubWindow(self.imu_window, QtCore.Qt.WindowType.WindowMinMaxButtonsHint)
-        # self.imu_window.show()  
-
         self.showSensorData = True
         self.showOrientation = True
         self.showPosition = False
@@ -258,17 +318,19 @@ class ShartWindow(QtWidgets.QMainWindow):
         self._setup_3d_views()
         self._setup_altitude()
         self._setup_sensor_plots()
-       
-        #self._setup_pos_plots()
-        
 
         self.setCentralWidget(self.centralWidget)
 
         # QTimer controlling update rate of all the plots (for now they all share on rate)
         self.ui_update_timer = QTimer()
         self.ui_update_timer.timeout.connect(self._update_ui)
-        self.ui_update_timer.setInterval(50)
+        self.ui_update_timer.setInterval(100)
         self.ui_update_timer.start()
+
+        self.rot_update_timer = QTimer()
+        self.rot_update_timer.timeout.connect(self._update_3d)
+        self.rot_update_timer.setInterval(200)
+        self.rot_update_timer.start()
 
     def _toggle_all(self):
         self.showSensorData = not self.showSensorData
@@ -277,14 +339,17 @@ class ShartWindow(QtWidgets.QMainWindow):
         self._kalman_uninitialized = True # this triggers reinitialization in the process_packet() function
 
     def _setup_header(self):
+        logo = QtWidgets.QLabel()
+        logo.setStyleSheet("padding-bottom: 20px")
+        logo.setPixmap(QPixmap("assets/aerologo.png").scaled(200, 60, transformMode=Qt.TransformationMode.SmoothTransformation))
         header_label = QtWidgets.QLabel("SHART Telemetry Visualizer", self)
-        header_label.setStyleSheet("font-size: 20px; font-weight: bold; padding: 20px; text-align: center;")
+        header_label.setStyleSheet("font-size: 38px; padding: 20px; text-align: center;")
 
         self.com_port_combo = QtWidgets.QComboBox()
         self.com_port_combo.addItems(self._get_available_com_ports())
         self.com_port_combo.currentTextChanged.connect(self._on_com_port_selected)
         
-        
+        self.header.addWidget(logo)
         self.header.addWidget(header_label, stretch = 1)
         self.header.addWidget(QtWidgets.QLabel("Select COM Port:"), stretch=0)
         self.header.addWidget(self.com_port_combo)
@@ -293,9 +358,19 @@ class ShartWindow(QtWidgets.QMainWindow):
         self.timer_widget = QtWidgets.QLabel("00:00:00.000")
         self.timer_widget.setStyleSheet("font-size: 25px; font-weight: bold; padding: 5px; text-align: center;")
         self.side_bar.addWidget(self.timer_widget)
+
+        self.calib_progress_bar = QtWidgets.QProgressBar()
+        self.calib_progress_bar.setTextVisible(False)
+        self.calib_progress_bar.setFixedWidth(170)
+        self.calib_progress_bar.setValue(0)
+        self.side_bar.addWidget(self.calib_progress_bar)
+
+        self.missed_packets_num = QLabelPair("Lost packets: ", "0")
+        
+        self.side_bar.addWidget(self.missed_packets_num)
+
         section_header_style = "font-size: 15px; font-weight: bold; padding: 5px; text-align: center;"
         sensor_status_view = QtWidgets.QVBoxLayout()
-        sensor_status_view.setContentsMargins(10, 10, 10, 10) 
         status_section_label = QtWidgets.QLabel("Component Checks")
         status_section_label.setStyleSheet(section_header_style)
         sensor_status_view.addWidget(status_section_label)
@@ -308,25 +383,47 @@ class ShartWindow(QtWidgets.QMainWindow):
             status_label.setStyleSheet("color: red;")
             sensor_status_view.addWidget(status_label)
             self.status_labels.append(status_label)
-        self.side_bar.addLayout(sensor_status_view, stretch=1)
         kill_button = QtWidgets.QPushButton("MURDER")
         kill_button.clicked.connect(self._stop)
+        ekf_reset_button = QtWidgets.QPushButton("Reset EKF")
+        ekf_reset_button.clicked.connect(self._reset_ekf)
         self.side_bar.addWidget(kill_button)
+        self.side_bar.addWidget(ekf_reset_button)
 
         gps_view = QtWidgets.QVBoxLayout()
         gps_view_label = QtWidgets.QLabel("GPS Data")
         gps_view_label.setStyleSheet(section_header_style)
-        self.coords = QtWidgets.QLabel()
+        self.lat = QLabelPair("Latitude: ", "0")
+        self.lon = QLabelPair("Longitude: ", "0")
+        self.sats = QLabelPair("Satellites: ", "0")
+        self.alt = QLabelPair("Altitude (m): ", "0")
+        self.fix = QLabelPair("Fix type: ", "No Fix")
         gps_view.addWidget(gps_view_label)
-        gps_view.addWidget(self.coords)
-        self.side_bar.addLayout(gps_view, stretch=1)
-
+        gps_view.addWidget(self.lat)
+        gps_view.addWidget(self.lon)
+        gps_view.addWidget(self.sats)
+        gps_view.addWidget(self.alt)
+        gps_view.addWidget(self.fix)
+    
         kalman_view = QtWidgets.QVBoxLayout()
         kalman_view_label = QtWidgets.QLabel("Kalman Filter Data")
         kalman_view_label.setStyleSheet(section_header_style)
-        self.blah = QtWidgets.QLabel()
+        self.blah = QLabelPair("Global position valid", "No")
+        self.kalman_pos_x = QLabelPair("Position X: ", "0")
+        self.kalman_pos_y = QLabelPair("Position Y: ", "0")
+        self.kalman_pos_z = QLabelPair("Position Z: ", "0")
         kalman_view.addWidget(kalman_view_label)
         kalman_view.addWidget(self.blah)
+        kalman_view.addWidget(self.kalman_pos_x)
+        kalman_view.addWidget(self.kalman_pos_y)
+        kalman_view.addWidget(self.kalman_pos_z)
+
+        sensor_status_view.setContentsMargins(10, 10, 10, 10) 
+        gps_view.setContentsMargins(10, 10, 10, 10) 
+        kalman_view.setContentsMargins(10, 10, 10, 10) 
+
+        self.side_bar.addLayout(sensor_status_view, stretch=1)
+        self.side_bar.addLayout(gps_view, stretch=1)
         self.side_bar.addLayout(kalman_view, stretch=1)
 
     def _setup_sensor_plots(self):
@@ -334,7 +431,6 @@ class ShartWindow(QtWidgets.QMainWindow):
         layout = QtWidgets.QVBoxLayout()
         widget.setLayout(layout)
         sensor_names = ["Accelerometer (m/s^2)", "Gyroscope (rad/s)", "Magnetometer (uT)"]
-        #self.imu_window.setLayout(layout)
         self.sensor_plot_widgets = [SensorPlot3Axes(self, sensor_names[i]) for i in range(3)]
         for plot_widget in self.sensor_plot_widgets:
             layout.addWidget(plot_widget)
@@ -349,25 +445,29 @@ class ShartWindow(QtWidgets.QMainWindow):
         #self.screen.addLayout(self.layout)
         
     def _setup_3d_views(self):
-        self.RotView = gl.GLViewWidget()
+        self.RotView = GLViewWidgetNoMouse()
         self.RotView.setBackgroundColor(PLOT_BACKGROUND)
 
 
         self.xgrid = gl.GLGridItem()
         self.xgrid = GLMeshItem(load_obj_to_numpy("assets/bunny.obj"))
-        self.xgrid.scale(0.2,0.2,0.2)
-        self.rotAxes = gl.GLAxisItem(parentItem=self.xgrid, glOptions='additive')
-        self.rotAxes.setSize(10,10,10)
+        self.xgrid.scale(0.16,0.16,0.16)
+        self.rotAxes = GLBetterAxes(parentItem=self.xgrid, glOptions='additive')
+        self.rotAxes.setSize(20,20,20)
+        self.rotAxes.rotate(180,0,0,0)
         self.RotView.addItem(self.xgrid)
-
         
         self.RotView.setMinimumSize(300, 300)
-        
         self.last_quat = QQuaternion(0,0,1,0) 
-
-        self.angle_label = QtWidgets.QLabel(parent=self.RotView)
-        self.angle_label.setStyleSheet("font-family: 'Consolas';font-size: 14px")
-        self.angle_label.setGeometry(30, 30, 100, 88)
+        self.roll_label = QLabelPair("Roll ", "0", parent=self.RotView)
+        self.pitch_label = QLabelPair("Pitch ", "0", parent=self.RotView)
+        self.yaw_label = QLabelPair("Yaw ", "0", parent=self.RotView)
+        self.roll_label.setStyleSheet("font-family: 'Consolas';font-size: 14px")
+        self.pitch_label.setStyleSheet("font-family: 'Consolas';font-size: 14px")
+        self.yaw_label.setStyleSheet("font-family: 'Consolas';font-size: 14px")
+        self.roll_label.setGeometry(35, 30, 100, 58)
+        self.pitch_label.setGeometry(35, 30, 100, 88)
+        self.yaw_label.setGeometry(35, 30, 100, 118)
 
         reset_orientation_button = QtWidgets.QPushButton("Reset Orientation", parent=self.RotView)
         reset_orientation_button.clicked.connect(self._reset_orientation)
@@ -377,7 +477,8 @@ class ShartWindow(QtWidgets.QMainWindow):
 
     def _reset_orientation(self):
         self.xgrid.resetTransform()
-        self.xgrid.scale(0.2,0.2,0.2)
+        self.xgrid.rotate(90,0,180,0)
+        self.xgrid.scale(0.16,0.16,0.16)
 
     def _setup_altitude(self):
         self.altitude_plot = SensorPlot(self, "Altitude (m)")
@@ -398,11 +499,14 @@ class ShartWindow(QtWidgets.QMainWindow):
             self.packet_reader.terminate()
             self.packet_reader.wait()
             self.packet_reader.radio_serial.close_port()
+            # self._sensor_packet = None
+            # self._gps_packet = None
             
         self._reset_ekf()
         if (com_port == "None"):
             return
 
+        
         if not self._calibrated:
             msg = QtWidgets.QMessageBox()
             msg.setIconPixmap(QPixmap("assets/lala.png").scaled(50, 50, transformMode=Qt.TransformationMode.SmoothTransformation))
@@ -410,17 +514,67 @@ class ShartWindow(QtWidgets.QMainWindow):
             msg.setText("\"Proceed with calibration or load from a file?\"")
             msg.setStandardButtons(QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No)
             msg.setDefaultButton(QtWidgets.QMessageBox.StandardButton.Yes)
+
             yes_button = msg.button(QtWidgets.QMessageBox.StandardButton.Yes)
             no_button = msg.button(QtWidgets.QMessageBox.StandardButton.No)
             
             yes_button.setText("Start Calibration")
             no_button.setText("Load from File")
+
+            # Show the input dialog
             response = msg.exec()
+
+            # If the message box 'Yes' is selected, proceed with calibration or file loading
             if response == QtWidgets.QMessageBox.StandardButton.Yes:
-                self._calibrated = False
                 
+                input_dialog = QtWidgets.QDialog(msg)
+                input_dialog.setWindowTitle("Calibration Options")
+                input_layout = QtWidgets.QVBoxLayout(input_dialog)
+                input_field = QtWidgets.QLineEdit(input_dialog)
+                input_field.setText(str(10000))
+                def validate_and_accept():
+                    text_value = input_field.text()
+                    try:
+                        numerical_value = int(text_value)
+                        if (numerical_value >= 5000 and numerical_value <= 20000):
+                            input_dialog.accept()
+                        else:
+                            QtWidgets.QMessageBox.warning(input_dialog, "Out of Range", "Please enter an integer between 5000 and 20000")
+                    except ValueError:
+                        QtWidgets.QMessageBox.warning(input_dialog, "Idiot", "Please enter an integer")
+
+                combo_box = QtWidgets.QComboBox(input_dialog)
+                combo_box.addItem("Yes", 1)
+                combo_box.addItem("No", 0)
+
+                input_layout.addWidget(QtWidgets.QLabel("Calibration Datapoints"))
+                input_layout.addWidget(input_field)
+                input_layout.addWidget(QtWidgets.QLabel("Save calibration file?"))
+                input_layout.addWidget(combo_box)
+
+                button_layout = QtWidgets.QHBoxLayout()
+                ok_button = QtWidgets.QPushButton("OK", input_dialog)
+                cancel_button = QtWidgets.QPushButton("Cancel", input_dialog)
+                ok_button.clicked.connect(validate_and_accept)
+                cancel_button.clicked.connect(input_dialog.reject)
+                button_layout.addWidget(ok_button)
+                button_layout.addWidget(cancel_button)
+
+                input_layout.addLayout(button_layout)
+
+                input_result = input_dialog.exec()
+
+                if input_result == QtWidgets.QDialog.DialogCode.Accepted:
+                    self._calib_points = int(input_field.text())
+                    self.calib_progress_bar.setRange(0, self._calib_points)
+                    self._calib_save = combo_box.currentData()
+                    self._calib_data_arr = np.empty((self._calib_points, 6))
+                    self._calib_time_arr = np.empty(self._calib_points)
+
+                    self._calibrated = False
+
             elif response == QtWidgets.QMessageBox.StandardButton.No:
-                
+                # Open the file dialog for loading calibration data
                 file_dialog = QtWidgets.QFileDialog(self)
                 file_dialog.setFileMode(QtWidgets.QFileDialog.FileMode.ExistingFile)  
                 file_dialog.setNameFilter("Calibration Files (*.npz)")
@@ -434,7 +588,7 @@ class ShartWindow(QtWidgets.QMainWindow):
                     self._calib_params[2] = calib_data['gC']
                     self._calib_params[3] = calib_data['gb']
                     self._calib_params[4] = calib_data['Rm']
-                
+                self.calib_progress_bar.hide()
                 self._calibrated = True
             
         self.packet_reader = PacketReader(com_port)
@@ -455,48 +609,66 @@ class ShartWindow(QtWidgets.QMainWindow):
     def process_sensor_packet(self, packet):
         self._sensor_packet = list(packet) #make packet available to UI for plotting
         self._sensor_packet[0] += self.packet_reader.radio_serial.overflows * 4294967295
+        # if True:#np.linalg.norm(packet[12:15]) > ADXL_32G:
+        #     self._sensor_packet[1:4] = packet[12:15] # uncalibrated, later fix this
+        #     self._using_adxl = True
+        # else:
+        #     self._sensor_packet[1:4] = calibrate_accelerometer_single(convertRawAcc(*packet[1:4]), self._calib_params[0], self._calib_params[1])
+        #     self._using_adxl = False
         self._sensor_packet[1:4] = calibrate_accelerometer_single(convertRawAcc(*packet[1:4]), self._calib_params[0], self._calib_params[1])
         self._sensor_packet[4:7] = calibrate_gyroscope_single(convertRawGyr(*packet[4:7]), self._calib_params[2], self._calib_params[3], self._calib_params[4])
         # approximate missed packets using timestamp differences
+        if self._last_timestamp == 0:
+            self._last_timestamp = self._sensor_packet[0]
         self._packets_missed += max(0, int((self._sensor_packet[0] - self._last_timestamp) / 4800) - 1)
         self._last_timestamp = self._sensor_packet[0]
-        print(self._packets_missed)
-        #self.sensor_packet[12:15] = packet[4:7] * 0.48069 # raw adxl to m/s^2
+        # print(self._packets_missed)
+        #self.sensor_packet[12:15] = packet[12:15] * 0.48069 # raw adxl to m/s^2
         # Handle calibration in its entirety right here
         # Yes this is ugly, too much unrelated code in this function, but no overhead for regular execution (just an extra branch instr in theory)
         if not self._calibrated:
-            if self._calib_packets_read < CALIB_DATAPOINTS:
+            if self._calib_packets_read < self._calib_points:
                 self._calib_time_arr[self._calib_packets_read] = self._sensor_packet[0]
-                self.calib_data_arr[self._calib_packets_read] = self._sensor_packet[1:4] + self._sensor_packet[4:7]
+                self._calib_data_arr[self._calib_packets_read] = self._sensor_packet[1:4] + self._sensor_packet[4:7]
                 self._calib_packets_read += 1
                 return
             
             self.packet_reader.pause()
             # self.packet_reader.setPriority(QtCore.QThread.Priority.IdlePriority)
             
-            reg_intervals = np.arange(self._calib_time_arr[0], self._calib_time_arr[-1], 1e6 / CALIB_FREQUENCY)
+            reg_intervals  = np.arange(self._calib_time_arr[0], self._calib_time_arr[-1], 1e6 / CALIB_FREQUENCY)
             y_interpolated = np.zeros((len(reg_intervals), self._calib_data_arr.shape[1]))
 
             # for each column, interpolate the data based on our specified intervals
             for i in range(self._calib_data_arr.shape[1]):
                 y_interpolated[:, i] = np.interp(reg_intervals, self._calib_time_arr, self._calib_data_arr[:, i])
             #print(self.packet_reader.radio_serial.overflows)
-            self._calib_params = list(all_calib_params(y_interpolated, CALIB_FREQUENCY))
-            #print(self.calib_params)
-            np.savez("calib/" + formatted_time, aC=self._calib_params[0], ab=self._calib_params[1], gC=self._calib_params[2], gb=self._calib_params[3], Rm=self._calib_params[4])
+            #self._calib_params 
+            self._calib_params[0], self._calib_params[1], self._calib_params[2], self._calib_params[3], self._calib_params[4], gyro_residuals = list(all_calib_params(y_interpolated, CALIB_FREQUENCY))
+            # print(self._calib_params)
+            if (self._calib_save):
+                np.savez("calib/" + formatted_time + "-" + str(gyro_residuals), aC=self._calib_params[0], ab=self._calib_params[1], gC=self._calib_params[2], gb=self._calib_params[3], Rm=self._calib_params[4])
             self._calibrated = True
+            self.calib_progress_bar.hide()
+            msg = QtWidgets.QMessageBox()
+            msg.setIcon(QtWidgets.QMessageBox.Icon.Information)
+            msg.setWindowTitle("Calibration Results")
+            msg.setText(f"Gyro residuals: {gyro_residuals}") 
+            msg.setStandardButtons(QtWidgets.QMessageBox.StandardButton.Ok)
+            _ = msg.exec()
             self.packet_reader.flush()
             self.packet_reader.unpause()
-            # self.packet_reader.setPriority(QtCore.QThread.Priority.NormalPriority)
             return
 
         if self._kalman_uninitialized:
             self.kalman.begin(packet[0])
             self._kalman_uninitialized = False
         # Push data and update kalman filter
-        self.kalman.setIMU(packet[0], np.array(self._sensor_packet[4:7], dtype=np.float32)[:,np.newaxis], np.array(self._sensor_packet[1:4], dtype=np.float32)[:,np.newaxis])
-        self.kalman.setMag(packet[0], np.array(packet[7:10], dtype=np.float32)[:,np.newaxis] / 100) # divide by 100 to convert from uT to Gauss
-        self.kalman.setBaro(packet[0], packet[11]) # pass raw pressure data in hPa here
+        self.kalman.setIMU(self._sensor_packet[0], self._sensor_packet[4:7], self._sensor_packet[1:4])
+        self.kalman.setMag(self._sensor_packet[0], packet[7:10]) # divide by 100 to convert from uT to Gauss
+        # if (np.linalg.norm(np.array(packet[7:10])) > 100):
+        #     print(packet)
+        self.kalman.setBaro(self._sensor_packet[0], packet[11]) # pass raw pressure data in hPa here
         self.kalman.update() # update the filter on the IMU cycle, as in the PX4-EKF tests
 
     @pyqtSlot(list)
@@ -515,30 +687,19 @@ class ShartWindow(QtWidgets.QMainWindow):
         hours, rem = divmod(sec_from_micro, 3600)
         minutes, seconds = divmod(rem, 60)
         self.timer_widget.setText("{:0>2}:{:0>2}:{:0>6.3f}".format(int(hours),int(minutes),seconds))
-
+        self.missed_packets_num.setText(f"{self._packets_missed}")
+        if not self._calibrated:
+            self.calib_progress_bar.setValue(self._calib_packets_read)
         if self.showSensorData:
             self.sensor_plot_widgets[0].update_plot(self._sensor_packet[1:4])
             self.sensor_plot_widgets[1].update_plot(self._sensor_packet[4:7])
             self.sensor_plot_widgets[2].update_plot(self._sensor_packet[7:10])
-        if self.showPosition:
-            pos = np.array(self.kalman.getPosition()).squeeze()
-            self.pos_plot_widgets[0].update_plot(pos[1],  pos[0])
-            self.pos_plot_widgets[1].update_plot(pos[0], -pos[2]) # note we negate the Down component for intuitive plots
-            self.pos_plot_widgets[2].update_plot(pos[1], -pos[2])
-        if self.showOrientation:
-            quat = np.array(self.kalman.getQuaternion()).squeeze()
-            curr = QQuaternion(*quat)
-            self.xgrid.transform().rotate((self.last_quat.inverted()*curr)) # get the delta quaternion (only Transform3D object takes quaternion rotation)
-            self.xgrid.update()
-            self.last_quat = curr
-            euler = self.last_quat.toEulerAngles()
-            pitch = np.degrees(euler.x()) % 360
-            roll =  np.degrees(euler.y()) % 360
-            yaw =   np.degrees(euler.z()) % 360
-
-            # Update label text
-            self.angle_label.setText(f"Roll:  {roll:>.2f}°\nPitch: {pitch:>.2f}°\nYaw:   {yaw:>.2f}°")
-
+        # if self.showPosition:
+        #     pos = self.kalman.getPosition().squeeze()
+        #     self.pos_plot_widgets[0].update_plot(pos[1],  pos[0])
+        #     self.pos_plot_widgets[1].update_plot(pos[0], -pos[2]) # note we negate the Down component for intuitive plots
+        #     self.pos_plot_widgets[2].update_plot(pos[1], -pos[2])
+        
         self.altitude_plot.update_plot(self._press_to_alt(self._sensor_packet[11]))
         
         for i in range(6): 
@@ -548,10 +709,12 @@ class ShartWindow(QtWidgets.QMainWindow):
             else:
                 self.status_labels[i].setStyleSheet("color: red;")
 
-        if not self._gps_packet:
-            return
-        
-        self.coords.setText(f"lat: {self._gps_packet[1] / 1e7: .6f}\nlon: {self._gps_packet[2] / 1e7: .6f}")
+        if self._gps_packet: 
+            self.lat.setText(f"{self._gps_packet[1] / 1e7: .6f}")
+            self.lon.setText(f"{self._gps_packet[2] / 1e7: .6f}")
+            self.sats.setText(f"{self._gps_packet[12]}")
+            self.alt.setText(f"{self._gps_packet[3] / 1e3: 0.3f}")
+            self.fix.setText(f"{FIX_TYPES[self._gps_packet[13]]}")
         ## CHECK IN-air/is vehicle at rest flags!
         #print(np.array(self.kalman.ekf.get_innovation_test_status())) #IMPORTANT!
         #print(np.array(self.kalman.ekf.getOutputTrackingError()))
@@ -562,6 +725,22 @@ class ShartWindow(QtWidgets.QMainWindow):
         #print(self.kalman.ekf.global_position_is_valid())
         #print(self.kalman.ekf.control_status().gps)
         #print(self.kalman.ekf.warning_event_status().value)
+    def _update_3d(self):
+        if self.showOrientation:
+            quat = self.kalman.getQuaternion().squeeze()
+            curr = QQuaternion(*quat)
+            self.xgrid.transform().rotate((self.last_quat.inverted()*curr)) # get the delta quaternion (only Transform3D object takes quaternion rotation)
+            self.xgrid.update()
+            self.last_quat = curr
+            euler = self.last_quat.toEulerAngles()
+            pitch = np.degrees(euler.x()) % 360
+            roll =  np.degrees(euler.y()) % 360
+            yaw =   np.degrees(euler.z()) % 360
+
+            # Update label text
+            self.roll_label.setText(f"{roll:>.2f}°")
+            self.pitch_label.setText(f"{pitch:>.2f}°")
+            self.yaw_label.setText(f"{yaw:>.2f}°")                                    
 
     def _press_to_alt(self, press: float):
         return 44330 * (1.0 - math.pow(press /
@@ -582,7 +761,7 @@ if __name__ == "__main__":
             color: #dcdcdc;
         }
         QLabel {
-            background-color: transparent;    
+            background-color: transparent;
             color: #aaaaaa     
         }
         QMdiArea {
@@ -590,19 +769,21 @@ if __name__ == "__main__":
             color: #dcdcdc;
         }
         QPushButton {
+            font-size: 16px;          
             background-color: #22222f;
             color: #aaaaaa;
             padding: 10px;
             border-radius: 5px;
         }
-        
+        QPushButton:pressed {
+                background-color: #10121f;
+                border: 2px solid #10121f;
+        }
         QComboBox {
             background-color: #10121f;
             color: #ffffff;
             border: 1px solid #4db8ff;
         }
     """)
-    main.show()
+    main.showMaximized()
     app.exec()
-
-#pip install qt-material to make this look better

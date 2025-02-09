@@ -10,7 +10,7 @@ class EkfWrapper:
         self.ekf = ecl.Ekf()
         self.params = self.ekf.getParamHandle()
 
-    def begin(self, last_time = 0):
+    def begin(self, last_time = 0) -> None:
         self.ekf.init(last_time)
         self.last_time = last_time
         self.params.fusion_mode = 1
@@ -41,14 +41,14 @@ class EkfWrapper:
         self.params.gps_pos_body = ecl.Vector3f(np.array([0,0,0], dtype=np.float32)[:,np.newaxis])
         # other stuff here
 
-    def setIMU(self, timestamp, ang, vel):
+    def setIMU(self, timestamp, ang, vel) -> None:
         dt = (timestamp - self.last_time) / 1e6
         #print(dt)
         self.last_time = timestamp
         imudata = ecl.imuSample()
         imudata.time_us = int(timestamp)
-        imudata.delta_ang = ecl.Vector3f(ang * dt)
-        imudata.delta_vel = ecl.Vector3f(vel * dt)
+        imudata.delta_ang = ecl.Vector3f(np.array(ang, dtype=np.float32)[:,np.newaxis] * dt)
+        imudata.delta_vel = ecl.Vector3f(np.array(vel, dtype=np.float32)[:,np.newaxis] * dt)
         #print(np.array(imudata.delta_vel).dtype)
         #imudata.delta_ang = ecl.Vector3f(np.array([[0,0,0]], dtype=np.float32).transpose() *dt)
         #imudata.delta_vel = ecl.Vector3f(np.array([[0,0,9.81]], dtype=np.float32).transpose() *dt)
@@ -56,20 +56,20 @@ class EkfWrapper:
         imudata.delta_vel_dt = dt
         self.ekf.setIMUData(imudata)
 
-    def setMag(self, timestamp, mag):
+    def setMag(self, timestamp, mag) -> None:
         magdata = ecl.magSample()
         magdata.time_us = int(timestamp)
-        magdata.mag = ecl.Vector3f(mag)
+        magdata.mag = ecl.Vector3f(np.array(mag, dtype=np.float32)[:,np.newaxis]  / 100)
         self.ekf.setMagData(magdata)
 
-    def setBaro(self, timestamp, pres):
+    def setBaro(self, timestamp, pres) -> None:
         barodata = ecl.baroSample()
         barodata.time_us = int(timestamp)
         barodata.hgt = np.float32(44330.0 * (1.0 - pow((pres / 101325), 0.1903)))
         #print(barodata.hgt)
         self.ekf.setBaroData(barodata)
 
-    def setGPS(self, timestamp, lon, lat, alt, vel_n, vel_e, vel_d, eph, epv, sacc, vel, pdop, nsats, fix_type, _, flags):
+    def setGPS(self, timestamp, lon, lat, alt, vel_n, vel_e, vel_d, eph, epv, sacc, vel, pdop, nsats, fix_type, _, flags) -> None:
         gpsdata = ecl.gps_message()
         gpsdata.time_usec = int(timestamp)
         gpsdata.lon = int(lon)
@@ -89,13 +89,13 @@ class EkfWrapper:
         self.ekf.setGpsData(gpsdata)
 
     def getPosition(self):
-        return self.ekf.getPosition()
+        return np.array(self.ekf.getPosition())
     
     def getVelocity(self):
-        return self.ekf.getVelocity()
+        return np.array(self.ekf.getVelocity())
     
     def getQuaternion(self):
-        return self.ekf.getQuaternion()
+        return np.array(self.ekf.getQuaternion())
 
-    def update(self):
+    def update(self) -> None:
         self.ekf.update()

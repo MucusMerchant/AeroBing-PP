@@ -125,7 +125,7 @@ def all_calib_params(imu_data, frequency):
     accs_calibrated = calibrate_accelerometer(accs, theta_found_acc)
 
     # find gyroscope calibration parameters
-    theta_found_gyr = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+    theta_found_gyr        = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
     theta_found_gyr[-6:-3] = np.mean(angs[0:100,:], axis=0) # just bias here
 
     # Cost function that tells us how well the data fit the model
@@ -137,4 +137,4 @@ def all_calib_params(imu_data, frequency):
     theta_found_gyr = find_calib_params_gyr(True, residual_gyr, theta_found_gyr, 
         angs, accs_calibrated, standstill, 1/frequency)
     print("Gyroscope residuals after calibration: ", residualSum())
-    return acceleration_equation_components(theta_found_acc) + gyroscope_equation_components(theta_found_gyr[0:9], theta_found_gyr[9:12])
+    return acceleration_equation_components(theta_found_acc) + gyroscope_equation_components(theta_found_gyr[0:9], theta_found_gyr[9:12]) + (residualSum(),)
