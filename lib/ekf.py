@@ -20,11 +20,11 @@ class EkfWrapper:
         self.params.mag_fusion_type = 2
         self.gps_delay_ms = 95
         self.params.sensor_interval_min_ms = 4
-        self.params.accel_noise = 3.38445e-2
-        self.params.gyro_noise = 3.92699e-3
+        self.params.accel_noise = 7e-2#3.38445e-2
+        self.params.gyro_noise = 8e-3#3.92699e-3
         #self.params.baro_noise = 0.5
         #self.params.mag_heading_noise = 1
-        self.params.mag_declination_deg = -12.93
+        self.params.mag_declination_deg = 11.62#-12.93
         #self.params.pos_noaid_noise = 100
         #self.params.mag_declination_source = 0
         #self.params.gyro_bias_p_noise = .01
