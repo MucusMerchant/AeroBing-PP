@@ -771,8 +771,7 @@ class ShartWindow(QtWidgets.QMainWindow):
             self.last_quat = curr
 
             rotation_matrix = self.xgrid.transform().normalMatrix()
-            quaternion = QQuaternion.fromRotationMatrix(rotation_matrix)
-            euler = quaternion.toEulerAngles()
+            euler = QQuaternion.fromRotationMatrix(rotation_matrix).toEulerAngles()
             pitch = np.degrees(euler.x()) % 360
             roll =  np.degrees(euler.y()) % 360
             yaw =   np.degrees(euler.z()) % 360

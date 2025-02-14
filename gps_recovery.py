@@ -75,7 +75,7 @@ class QLabelPair(QtWidgets.QWidget):
         self.static_label.setStyleSheet(stylesheet)
         self.dynamic_label.setStyleSheet(stylesheet)
 
-class ShartWindow(QtWidgets.QMainWindow):
+class ReplayWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Emergency GPS Recovery")
@@ -196,7 +196,7 @@ if __name__ == "__main__":
     
     
     app = QtWidgets.QApplication([])
-    main = ShartWindow()
+    main = ReplayWindow()
     main.setStyleSheet("""
         QMainWindow {
             background-color: #10121f;
