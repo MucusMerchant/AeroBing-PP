@@ -6,7 +6,7 @@ from pyqtgraph import functions as fn
 import pyqtgraph.opengl as gl
 from OpenGL.GL import glBegin, glPointSize, glEnd, glVertex3f, glColor4f, glLineWidth, GL_LINES, GL_POINTS
 import numpy as np
-from lib.packet_stream_serial import *
+from lib.packet_stream import *
 from lib.ekf import EkfWrapper
 from lib.calibrate import *
 from serial.tools import list_ports
@@ -17,7 +17,7 @@ import math
 RADIO_BAUD_RATE = 115200
 PLOT_BACKGROUND = "#141729"
 CALIB_DATAPOINTS = 10000
-CALIB_FREQUENCY = 200
+CALIB_FREQUENCY = 100
 FIX_TYPES = ["No fix", "Dead-reckoning only", "2D Fix", "3D Fix", "Epic", "Time only", "other (bad)"]
 ADXL_32G = 65536 # or 2^16
 BASELINE_PRESSURE = 101325
@@ -25,37 +25,42 @@ BASELINE_PRESSURE = 101325
 current_time = time.localtime()
 formatted_time = time.strftime("%Y-%m-%d_%H-%M-%S", current_time)
 
-class PacketReaderSerial(QThread):
+class PacketReader(QThread):
     sensorPacketReceived = pyqtSignal(list)
     gpsPacketReceived    = pyqtSignal(list)
     disconnected         = pyqtSignal()
-    def __init__(self, com_port="COM8"):
+    def __init__(self, type: str, com_port: str | None=None, file: str | None=None, speed: str | None=None):
         super().__init__()
-        self.radio_serial = PacketStream(com_port, RADIO_BAUD_RATE, "data/" + formatted_time + ".poop")
-        self.radio_serial.open_port()
-        self.radio_serial.start()
+        if (type == 'file'):
+            self.packet_reader = PacketStreamFile(file)
+            self.speed = speed
+        elif (type == 'serial'):
+            self.packet_reader = PacketStreamSerial(com_port, RADIO_BAUD_RATE, "data/" + formatted_time + ".poop")
+            self.speed = 0
+        else:
+            raise Exception("'file' and 'serial' are valid reader types")
         self.paused = False
-
-    def flush(self):
-        self.radio_serial.serial_bus.reset_input_buffer()
+        self.packet_reader.start()
 
     def run(self):
         while True:
             if self.paused:
-                time.sleep(5)
+                time.sleep(0.1)
                 continue
             try:
-                packet_type, packet = self.radio_serial.read_packet()
+                packet_type, packet = self.packet_reader.read_packet()
             except:
                 self.disconnected.emit()
                 return
             if packet_type == b'\x0b':
+                time.sleep(self.speed * 0.09)
                 self.sensorPacketReceived.emit(packet)
             if packet_type == b'\xca':
+                time.sleep(self.speed * 0.09)
                 self.gpsPacketReceived.emit(packet)
     
     def stop(self):
-        self.radio_serial.stop()
+        self.packet_reader.stop()
 
     def pause(self):
         self.paused = True
@@ -270,7 +275,7 @@ class ShartWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
         self._init_ui()
-        self.kalman = EkfWrapper()
+        self._kalman = EkfWrapper()
         self._kalman_uninitialized: bool = True
         self._sensor_packet = None
         self._gps_packet    = None
@@ -436,7 +441,7 @@ class ShartWindow(QtWidgets.QMainWindow):
         self.side_bar.addLayout(kalman_view, stretch=1)
 
         kill_button = QtWidgets.QPushButton("End Current File")
-        kill_button.clicked.connect(self._stop)
+        kill_button.clicked.connect(self._truncate)
         ekf_reset_button = QtWidgets.QPushButton("Reset EKF")
         ekf_reset_button.clicked.connect(self._reset_ekf)
         self.side_bar.addWidget(kill_button)
@@ -511,107 +516,124 @@ class ShartWindow(QtWidgets.QMainWindow):
 
     def _get_available_com_ports(self):
         ports = list_ports.comports()
-        return ["None"] + [port.device for port in ports] # + [".poop file"]
+        return ["None"] + [port.device for port in ports] + [".poop file"]
 
     def _on_com_port_selected(self, com_port):
         if hasattr(self, 'packet_reader') and self.packet_reader.isRunning():
             self.packet_reader.terminate()
             self.packet_reader.wait()
-            self.packet_reader.radio_serial.close_port()
+            self.packet_reader.stop()
             # self._sensor_packet = None
             # self._gps_packet = None
             
+        self._calibrated = False
+        self._reset_missed()
         self._reset_ekf()
 
         if (com_port == "None"):
             return
         
-        # if (com_port == ".poop file"):
+        if (com_port == ".poop file"):
+            file_dialog = QtWidgets.QFileDialog(self)
+            file_dialog.setFileMode(QtWidgets.QFileDialog.FileMode.ExistingFile)  
+            file_dialog.setNameFilter("Poop Files (*.poop)")
+            file_dialog.setDirectory(os.path.join(os.path.dirname(__file__), "data"))
+            file_dialog.setViewMode(QtWidgets.QFileDialog.ViewMode.List)
 
-        #     self._open_calib_file_dialog()
-        #     # todo
-        #     return
+            if file_dialog.exec():
+                self.file = file_dialog.selectedFiles()[0]
+                self.playback_speed = 1
+            # if not self.packet_reader.paused:
+            #     self._pause_toggle()
+            self._open_calib_file_dialog()
+            self.packet_reader = PacketReader('file', file=self.file, speed=self.playback_speed)
+            self.packet_reader.sensorPacketReceived.connect(self.process_sensor_packet)
+            self.packet_reader.gpsPacketReceived.connect(self.process_gps_packet)
+            self.packet_reader.disconnected.connect(self.handle_disconnect)
+            self.packet_reader.start()
 
-        
-        if not self._calibrated:
-            msg = QtWidgets.QMessageBox()
-            msg.setIconPixmap(QPixmap("assets/lala.png").scaled(50, 50, transformMode=Qt.TransformationMode.SmoothTransformation))
-            msg.setWindowTitle("IMU Calibration Options")
-            msg.setText("\"Proceed with calibration or load from a file?\"")
-            msg.setStandardButtons(QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No)
-            msg.setDefaultButton(QtWidgets.QMessageBox.StandardButton.Yes)
+        else:
+            if not self._calibrated:
+                msg = QtWidgets.QMessageBox()
+                msg.setIconPixmap(QPixmap("assets/lala.png").scaled(50, 50, transformMode=Qt.TransformationMode.SmoothTransformation))
+                msg.setWindowTitle("IMU Calibration Options")
+                msg.setText("\"Proceed with calibration or load from a file?\"")
+                msg.setStandardButtons(QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No)
+                msg.setDefaultButton(QtWidgets.QMessageBox.StandardButton.Yes)
 
-            yes_button = msg.button(QtWidgets.QMessageBox.StandardButton.Yes)
-            no_button = msg.button(QtWidgets.QMessageBox.StandardButton.No)
-            
-            yes_button.setText("Start Calibration")
-            no_button.setText("Load from File")
-
-            # Show the input dialog
-            response = msg.exec()
-
-            # If the message box 'Yes' is selected, proceed with calibration or file loading
-            if response == QtWidgets.QMessageBox.StandardButton.Yes:
+                yes_button = msg.button(QtWidgets.QMessageBox.StandardButton.Yes)
+                no_button = msg.button(QtWidgets.QMessageBox.StandardButton.No)
                 
-                input_dialog = QtWidgets.QDialog(msg)
-                input_dialog.setWindowTitle("Calibration Options")
-                input_layout = QtWidgets.QVBoxLayout(input_dialog)
-                input_field = QtWidgets.QLineEdit(input_dialog)
-                input_field.setText(str(10000))
-                def validate_and_accept():
-                    text_value = input_field.text()
-                    try:
-                        numerical_value = int(text_value)
-                        if (numerical_value >= 5000 and numerical_value <= 20000):
-                            input_dialog.accept()
-                        else:
-                            QtWidgets.QMessageBox.warning(input_dialog, "Out of Range", "Please enter an integer between 5000 and 20000")
-                    except ValueError:
-                        QtWidgets.QMessageBox.warning(input_dialog, "Idiot", "Please enter an integer")
+                yes_button.setText("Start Calibration")
+                no_button.setText("Load from File")
 
-                combo_box = QtWidgets.QComboBox(input_dialog)
-                combo_box.addItem("Yes", 1)
-                combo_box.addItem("No", 0)
+                # Show the input dialog
+                response = msg.exec()
 
-                input_layout.addWidget(QtWidgets.QLabel("Calibration Datapoints"))
-                input_layout.addWidget(input_field)
-                input_layout.addWidget(QtWidgets.QLabel("Save calibration file?"))
-                input_layout.addWidget(combo_box)
+                # If the message box 'Yes' is selected, proceed with calibration or file loading
+                if response == QtWidgets.QMessageBox.StandardButton.Yes:
+                    
+                    input_dialog = QtWidgets.QDialog(msg)
+                    input_dialog.setWindowTitle("Calibration Options")
+                    input_layout = QtWidgets.QVBoxLayout(input_dialog)
+                    input_field = QtWidgets.QLineEdit(input_dialog)
+                    input_field.setText(str(10000))
+                    def validate_and_accept():
+                        text_value = input_field.text()
+                        try:
+                            numerical_value = int(text_value)
+                            if (numerical_value >= 5000 and numerical_value <= 20000):
+                                input_dialog.accept()
+                            else:
+                                QtWidgets.QMessageBox.warning(input_dialog, "Out of Range", "Please enter an integer between 5000 and 20000")
+                        except ValueError:
+                            QtWidgets.QMessageBox.warning(input_dialog, "Idiot", "Please enter an integer")
 
-                button_layout = QtWidgets.QHBoxLayout()
-                ok_button = QtWidgets.QPushButton("OK", input_dialog)
-                cancel_button = QtWidgets.QPushButton("Cancel", input_dialog)
-                ok_button.clicked.connect(validate_and_accept)
-                cancel_button.clicked.connect(input_dialog.reject)
-                button_layout.addWidget(ok_button)
-                button_layout.addWidget(cancel_button)
+                    combo_box = QtWidgets.QComboBox(input_dialog)
+                    combo_box.addItem("Yes", 1)
+                    combo_box.addItem("No", 0)
 
-                input_layout.addLayout(button_layout)
+                    input_layout.addWidget(QtWidgets.QLabel("Calibration Datapoints"))
+                    input_layout.addWidget(input_field)
+                    input_layout.addWidget(QtWidgets.QLabel("Save calibration file?"))
+                    input_layout.addWidget(combo_box)
 
-                input_result = input_dialog.exec()
+                    button_layout = QtWidgets.QHBoxLayout()
+                    ok_button = QtWidgets.QPushButton("OK", input_dialog)
+                    cancel_button = QtWidgets.QPushButton("Cancel", input_dialog)
+                    ok_button.clicked.connect(validate_and_accept)
+                    cancel_button.clicked.connect(input_dialog.reject)
+                    button_layout.addWidget(ok_button)
+                    button_layout.addWidget(cancel_button)
 
-                if input_result == QtWidgets.QDialog.DialogCode.Accepted:
-                    self._calib_points = int(input_field.text())
-                    self.calib_progress_bar.setRange(0, self._calib_points)
-                    self._calib_save = combo_box.currentData()
-                    self._calib_data_arr = np.empty((self._calib_points, 6))
-                    self._calib_time_arr = np.empty(self._calib_points)
+                    input_layout.addLayout(button_layout)
 
-                    self._calibrated = False
+                    input_result = input_dialog.exec()
 
-            elif response == QtWidgets.QMessageBox.StandardButton.No:
-                # Open the file dialog for loading calibration data
-                self._open_calib_file_dialog()
+                    if input_result == QtWidgets.QDialog.DialogCode.Accepted:
+                        self._calib_points = int(input_field.text())
+                        self.calib_progress_bar.setRange(0, self._calib_points)
+                        self._calib_save = combo_box.currentData()
+                        self._calib_data_arr = np.empty((self._calib_points, 6))
+                        self._calib_time_arr = np.empty(self._calib_points)
+
+                        self._calibrated = False
+
+                elif response == QtWidgets.QMessageBox.StandardButton.No:
+                    # Open the file dialog for loading calibration data
+                    self._open_calib_file_dialog()
+                    
                 
-            
-        self.packet_reader = PacketReaderSerial(com_port)
-        self.packet_reader.sensorPacketReceived.connect(self.process_sensor_packet)
-        self.packet_reader.gpsPacketReceived.connect(self.process_gps_packet)
-        self.packet_reader.disconnected.connect(self.handle_disconnect)
-        self.packet_reader.start()
+            self.packet_reader = PacketReader('serial', com_port=com_port)
+            self.packet_reader.sensorPacketReceived.connect(self.process_sensor_packet)
+            self.packet_reader.gpsPacketReceived.connect(self.process_gps_packet)
+            self.packet_reader.disconnected.connect(self.handle_disconnect)
+            self.packet_reader.start()
+        self._calibrated = False
 
     def _open_calib_file_dialog(self):
         file_dialog = QtWidgets.QFileDialog(self)
+        file_dialog.setDirectory(os.path.join(os.path.dirname(__file__), "calib"))
         file_dialog.setFileMode(QtWidgets.QFileDialog.FileMode.ExistingFile)  
         file_dialog.setNameFilter("Calibration Files (*.npz)")
         file_dialog.setViewMode(QtWidgets.QFileDialog.ViewMode.List)
@@ -627,9 +649,9 @@ class ShartWindow(QtWidgets.QMainWindow):
         self.calib_progress_bar.hide()
         self._calibrated = True
 
-    def _stop(self):
-        if hasattr(self, "packet_reader") and self.packet_reader:
-            self.packet_reader.stop()
+    def _truncate(self):
+        if hasattr(self, "packet_reader") and self.packet_reader and isinstance(self.packet_reader.packet_reader, PacketStreamSerial):
+            self.packet_reader.packet_reader.new_file()
 
     @pyqtSlot()
     def handle_disconnect(self):
@@ -638,7 +660,7 @@ class ShartWindow(QtWidgets.QMainWindow):
     @pyqtSlot(list)
     def process_sensor_packet(self, packet):
         self._sensor_packet = list(packet) #make packet available to UI for plotting
-        self._sensor_packet[0] += self.packet_reader.radio_serial.overflows * 4294967295
+        #self._sensor_packet[0] += self.packet_reader.radio_serial.overflows * 4294967295
         # if True:#np.linalg.norm(packet[12:15]) > ADXL_32G:
         #     self._sensor_packet[1:4] = packet[12:15] # uncalibrated, later fix this
         #     self._using_adxl = True
@@ -686,28 +708,28 @@ class ShartWindow(QtWidgets.QMainWindow):
             msg.setText(f"Gyro residuals: {gyro_residuals:.5e}") 
             msg.setStandardButtons(QtWidgets.QMessageBox.StandardButton.Ok)
             _ = msg.exec()
-            self.packet_reader.flush()
+            #self.packet_reader.flush()
             self.packet_reader.unpause()
             return
 
         if self._kalman_uninitialized:
-            self.kalman.begin(packet[0])
+            self._kalman.begin(packet[0])
             self._kalman_uninitialized = False
         # Push data and update kalman filter
-        self.kalman.setIMU(self._sensor_packet[0], self._sensor_packet[4:7], self._sensor_packet[1:4])
-        self.kalman.setMag(self._sensor_packet[0], packet[7:10]) # divide by 100 to convert from uT to Gauss
+        self._kalman.setIMU(self._sensor_packet[0], self._sensor_packet[4:7], self._sensor_packet[1:4])
+        self._kalman.setMag(self._sensor_packet[0], packet[7:10]) # divide by 100 to convert from uT to Gauss
         # if (np.linalg.norm(np.array(packet[7:10])) > 100):
         #     print(packet)
-        self.kalman.setBaro(self._sensor_packet[0], packet[11]) # pass raw pressure data in hPa here
-        self.kalman.update() # update the filter on the IMU cycle, as in the PX4-EKF tests
+        self._kalman.setBaro(self._sensor_packet[0], packet[11]) # pass raw pressure data in hPa here
+        self._kalman.update() # update the filter on the IMU cycle, as in the PX4-EKF tests
 
     @pyqtSlot(list)
     def process_gps_packet(self, packet):
             #vel = np.array(self.kalman.getVelocity()).squeeze()
         self._gps_packet = list(packet)
-        self._gps_packet[0] += self.packet_reader.radio_serial.overflows * 4294967295
+        #self._gps_packet[0] += self.packet_reader.radio_serial.overflows * 4294967295
         if not self._kalman_uninitialized:
-            self.kalman.setGPS(*self._gps_packet)
+            self._kalman.setGPS(*self._gps_packet)
             #self.kalman.setGPS(packet[0], 407000000,-740000000, 30000,0,0,0,0,0,0,0,0,16,3,0,1)
 
     def _update_ui(self):
@@ -746,12 +768,12 @@ class ShartWindow(QtWidgets.QMainWindow):
             self.alt.setText(f"{self._gps_packet[3] / 1e3:.3f}")
             self.fix.setText(f"{FIX_TYPES[min(self._gps_packet[13], 6)]}")
 
-        self.blah.setText(f"{self.kalman.ekf.global_position_is_valid()}")
-        self.kalman_attitude_valid.setText(f"{self.kalman.ekf.attitude_valid()}")
-        pos = self.kalman.getPosition().squeeze()
-        self.kalman_pos_x.setText(f"{pos[0]}")
-        self.kalman_pos_y.setText(f"{pos[1]}")
-        self.kalman_pos_z.setText(f"{pos[2]}")
+        self.blah.setText(f"{self._kalman.ekf.global_position_is_valid()}")
+        self._kalman_attitude_valid.setText(f"{self.kalman.ekf.attitude_valid()}")
+        pos = self._kalman.getPosition().squeeze()
+        self.kalman_pos_x.setText(f"{pos[0]:.6f}")
+        self.kalman_pos_y.setText(f"{pos[1]:.6f}")
+        self.kalman_pos_z.setText(f"{pos[2]:.6f}")
         ## CHECK IN-air/is vehicle at rest flags!
         #print(np.array(self.kalman.ekf.get_innovation_test_status())) #IMPORTANT!
         #print(np.array(self.kalman.ekf.getOutputTrackingError()))
@@ -764,7 +786,7 @@ class ShartWindow(QtWidgets.QMainWindow):
         #print(self.kalman.ekf.warning_event_status().value)
     def _update_3d(self):
         if self.showOrientation:
-            quat = self.kalman.getQuaternion().squeeze()
+            quat = self._kalman.getQuaternion().squeeze()
             curr = QQuaternion(*quat)
             self.xgrid.transform().rotate((self.last_quat.inverted()*curr)) # get the delta quaternion (only Transform3D object takes quaternion rotation)
             self.xgrid.update()

@@ -11,7 +11,7 @@ from lib.packet_stream_serial import *
 # TODO (general PP): handle cases where time overflows
 np.set_printoptions(edgeitems=30, linewidth=1000, formatter={'float': '{: 0.4f}'.format})
 
-def get_imu_data(datapoints: int, target_frequency: int, stream: PacketStream):
+def get_imu_data(datapoints: int, target_frequency: int, stream):
     # preallocate a large np array - we will always fill this completely, no trimming required
     packets_read: int = 0
     time_arr = np.empty(datapoints)

@@ -1,16 +1,16 @@
 import csv
-from lib.packet_stream_file import *
+from lib.packet_stream import *
 
-POOP_TIMESTAMP = "2025-02-09_15-52-32"
+POOP_TIMESTAMP = "2025-02-21_18-51-03"
+
 FILE_NAME = "data/" + POOP_TIMESTAMP + ".poop"
-
 # Define the headers for sensor and GPS data
 SENSOR_HEADERS = ['time', 'acc_x', 'acc_y', 'acc_z', 'gyr_x', 'gyr_y', 'gyr_z', 'mag_x', 'mag_y', 'mag_z', 'temp', 'pressure', 'acc_x_adxl', 'acc_y_adxl', 'acc_y_adxl', 'status', 'sd_file']  # Adjust as per your packet structure
 GPS_HEADERS = ['time', 'latitude', 'longitude', 'altitude', 'vel_n', 'vel_e', 'vel_d', 'eph', 'epv', 'sacc', 'gspeed', 'pdop', 'nsats', 'fix_type', 'valid', 'flags']  # Adjust as per your packet structure
 
 if __name__ == "__main__":
-    packet_reader = PacketStream(FILE_NAME)
-    packet_reader.begin()
+    packet_reader = PacketStreamFile(FILE_NAME)
+    packet_reader.start()
     packets = 0
 
     with open('csv/' + POOP_TIMESTAMP + '_sensor.csv', mode='w', newline='') as sensor_file, open('csv/' + POOP_TIMESTAMP + '_gps.csv', mode='w', newline='') as gps_file:

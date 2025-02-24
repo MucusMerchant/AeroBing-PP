@@ -5,7 +5,7 @@ import pyqtgraph as pg
 from pyqtgraph import functions as fn
 import pyqtgraph.opengl as gl
 import numpy as np
-from lib.packet_stream_file import *
+from lib.packet_stream import *
 import time
 import math
 import os
@@ -23,8 +23,8 @@ class PacketReader(QThread):
     disconnected         = pyqtSignal()
     def __init__(self, file, speed):
         super().__init__()
-        self.packet_reader = PacketStream(file)
-        self.packet_reader.begin()
+        self.packet_reader = PacketStreamFile(file)
+        self.packet_reader.start()
         self.speed = speed
         self.paused = False
 
